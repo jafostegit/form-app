@@ -1,110 +1,116 @@
-from flask import Flask, request, redirect, render_template, flash
-from openpyxl import Workbook, load_workbook
+from flask import Flask, render_template, request, flash, redirect, url_for
+import csv
 import os
 from datetime import datetime
+import threading
+import time
 
 app = Flask(__name__)
-app.secret_key = 'your-secret-key-here-change-this-to-something-random'
-EXCEL_FILE = 'form_data.xlsx'
+app.secret_key = 'your-secret-key-here'
 
-def validate_form_data(data):
-    """Validate form data before saving"""
-    errors = []
+CSV_FILE_PATH = r'\\lofs010\cmip_groups\LOG-DGQ\3_PROCESSOS E PRODUTO\02 - Controlo de Produto\00 - Equipa\07 - Catarina_Pinheiro\form_data.csv' 
+
+# Lock for thread-safe file operations
+file_lock = threading.Lock()
+
+def save_to_csv(data):
+    """Save form data to CSV file - Windows compatible"""
+    max_retries = 3
+    retry_delay = 1  # seconds
     
-    if not data['fullname'].strip():
-        errors.append("Full name is required")
-    
-    if not data['email'].strip():
-        errors.append("Email is required")
-    
-    if data['age']:
+    for attempt in range(max_retries):
         try:
-            age = int(data['age'])
-            if age < 1 or age > 120:
-                errors.append("Age must be between 1 and 120")
-        except ValueError:
-            errors.append("Age must be a valid number")
+            with file_lock:
+                # Add timestamp
+                data['Timestamp'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                data['Submitted_From'] = request.environ.get('REMOTE_ADDR', 'Unknown')
+                
+                # Check if file exists to determine if we need headers
+                file_exists = os.path.exists(CSV_FILE_PATH)
+                
+                # Ensure directory exists
+                os.makedirs(os.path.dirname(CSV_FILE_PATH), exist_ok=True)
+                
+                # Open file in append mode
+                with open(CSV_FILE_PATH, 'a', newline='', encoding='utf-8') as csvfile:
+                    fieldnames = ['Full Name', 'Email', 'Age', 'Gender', 'Message', 'Timestamp', 'Submitted_From']
+                    writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+                    
+                    # Write header if file doesn't exist
+                    if not file_exists:
+                        writer.writeheader()
+                    
+                    # Write data
+                    writer.writerow(data)
+                    
+                    # Force write to disk
+                    csvfile.flush()
+                    os.fsync(csvfile.fileno())
+                
+                print(f"Successfully saved data to {CSV_FILE_PATH}")
+                return True
+                
+        except Exception as e:
+            print(f"Attempt {attempt + 1} failed: {e}")
+            if attempt < max_retries - 1:
+                time.sleep(retry_delay)
+            else:
+                print(f"All attempts failed. Final error: {e}")
+                return False
     
-    return errors
+    return False
 
 @app.route('/', methods=['GET', 'POST'])
 def index():
     if request.method == 'POST':
         # Get form data
         form_data = {
-            'fullname': request.form.get('fullname', ''),
-            'email': request.form.get('email', ''),
-            'age': request.form.get('age', ''),
-            'gender': request.form.get('gender', ''),
-            'message': request.form.get('message', '')
+            'Full Name': request.form.get('fullname', ''),
+            'Email': request.form.get('email', ''),
+            'Age': request.form.get('age', ''),
+            'Gender': request.form.get('gender', ''),
+            'Message': request.form.get('message', '')
         }
         
-        # Validate form data
-        errors = validate_form_data(form_data)
-        if errors:
-            for error in errors:
-                flash(error, 'error')
-            return render_template('form.html')
+        print(f"Received form data: {form_data}")
+        print(f"Attempting to save to: {CSV_FILE_PATH}")
         
-        try:
-            # Load or create Excel file
-            if os.path.exists(EXCEL_FILE):
-                wb = load_workbook(EXCEL_FILE)
-                ws = wb.active
-            else:
-                wb = Workbook()
-                ws = wb.active
-                # Add headers with timestamp
-                ws.append(['Timestamp', 'Full Name', 'Email', 'Age', 'Gender', 'Message'])
-            
-            # Add timestamp to the data
-            timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-            ws.append([
-                timestamp,
-                form_data['fullname'],
-                form_data['email'],
-                form_data['age'],
-                form_data['gender'],
-                form_data['message']
-            ])
-            
-            wb.save(EXCEL_FILE)
-            flash('Form submitted successfully!', 'success')
-            return redirect('/success')
-            
-        except Exception as e:
-            flash(f'Error saving data: {str(e)}', 'error')
-            return render_template('form.html')
-
+        # Save to CSV
+        if save_to_csv(form_data):
+            flash('Form submitted and saved successfully!', 'success')
+            print("Form saved successfully!")
+        else:
+            flash('Error saving form data. Please try again.', 'error')
+            print("Failed to save form data!")
+        
+        return redirect(url_for('index'))
+    
     return render_template('form.html')
 
-@app.route('/success')
-def success():
-    return render_template('success.html')
-
-@app.route('/view-data')
-def view_data():
-    """Optional: View submitted data"""
-    if not os.path.exists(EXCEL_FILE):
-        flash('No data file found', 'error')
-        return redirect('/')
-    
-    try:
-        wb = load_workbook(EXCEL_FILE)
-        ws = wb.active
-        data = []
-        
-        for row in ws.iter_rows(values_only=True):
-            if row[0]:  # Skip empty rows
-                data.append(row)
-        
-        return render_template('view_data.html', data=data)
-    
-    except Exception as e:
-        flash(f'Error reading data: {str(e)}', 'error')
-        return redirect('/')
-
 if __name__ == '__main__':
-    # Get port from environment variable or use 5000 for local development
-    port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port, debug=False)
+    # Test file path on startup
+    print(f"Starting application...")
+    print(f"CSV file path: {CSV_FILE_PATH}")
+    
+    # Test if we can write to the directory
+    try:
+        test_dir = os.path.dirname(CSV_FILE_PATH)
+        if not os.path.exists(test_dir):
+            os.makedirs(test_dir, exist_ok=True)
+            print(f"Created directory: {test_dir}")
+        else:
+            print(f"Directory exists: {test_dir}")
+            
+        # Test write permissions
+        test_file = os.path.join(test_dir, 'test_write.txt')
+        with open(test_file, 'w') as f:
+            f.write('test')
+        os.remove(test_file)
+        print("Write permissions OK")
+        
+    except Exception as e:
+        print(f"WARNING: Cannot write to {CSV_FILE_PATH}: {e}")
+        print("Please check the path and permissions")
+    
+    # Run on all network interfaces
+    app.run(host='0.0.0.0', port=5000, debug=True)
